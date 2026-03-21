@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remix"
+version = "0.1.0"
+description = "Artifact remix system that integrates Skill-SE-Kit"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "skill-se-kit>=0.1.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
