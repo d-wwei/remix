@@ -98,6 +98,7 @@ class SourceAdapter:
             "keywords": top_words(payload["content"]),
             "target_lenses": target_lenses,
             "units": units,
+            "url_content_signals": payload.get("url_content_signals"),
         }
 
     def _from_directory(self, source: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,12 +142,14 @@ class SourceAdapter:
         with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
         content = raw.decode("utf-8", errors="replace")
+        signals = _analyze_url_content(content)
         return {
             "location": url,
             "content": content,
             "file_tree_summary": [url],
             "docs_presence": True,
             "tests_presence": False,
+            "url_content_signals": signals,
         }
 
     def _from_raw_text(self, source: Dict[str, Any]) -> Dict[str, Any]:
@@ -357,3 +360,93 @@ class SourceAdapter:
                     }
                 )
         return units
+
+
+def _analyze_url_content(content: str) -> Dict[str, Any]:
+    """Extract differentiating structural signals from URL content.
+
+    Returns a dict of numeric signals that downstream scoring can use
+    to distinguish URL sources from each other.
+    """
+    lines = content.split("\n")
+    total_lines = len(lines)
+    words = content.split()
+    word_count = len(words)
+
+    # --- Heading analysis (depth and count) ---
+    heading_counts: Dict[int, int] = {}
+    for line in lines:
+        match = re.match(r"^(#{1,6})\s+", line)
+        if match:
+            level = len(match.group(1))
+            heading_counts[level] = heading_counts.get(level, 0) + 1
+    total_headings = sum(heading_counts.values())
+    max_heading_depth = max(heading_counts.keys()) if heading_counts else 0
+
+    # --- Rule/instruction density ---
+    # Lines starting with -, *, numbered items (1. 2. etc.), or imperative verbs
+    list_item_pattern = re.compile(r"^\s*[-*]\s+\S|^\s*\d+[.)]\s+\S")
+    imperative_pattern = re.compile(
+        r"^\s*(?:must|should|shall|ensure|verify|check|use|do|don\'t|never|always|avoid|prefer|consider|create|add|remove|set|run|define|implement|include|provide|make|keep|return|call|pass|validate|handle|configure|specify)\b",
+        re.IGNORECASE,
+    )
+    list_items = 0
+    imperative_lines = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if list_item_pattern.match(line):
+            list_items += 1
+        if imperative_pattern.match(stripped):
+            imperative_lines += 1
+    rule_density = list_items + imperative_lines
+
+    # --- Code block count ---
+    code_blocks = len(re.findall(r"(?m)^```", content))
+    # Fenced blocks have open+close, so divide by 2 for paired blocks
+    code_block_pairs = code_blocks // 2
+
+    # Also count indented code blocks (4+ spaces after a blank line)
+    indented_code_sections = 0
+    prev_blank = True
+    for line in lines:
+        if not line.strip():
+            prev_blank = True
+            continue
+        if prev_blank and line.startswith("    ") and not line.strip().startswith(("-", "*", "#")):
+            indented_code_sections += 1
+            prev_blank = False
+        else:
+            prev_blank = False
+    total_code_blocks = code_block_pairs + indented_code_sections
+
+    # --- Unique vocabulary richness ---
+    # Count distinct meaningful words (3+ chars, not purely numeric)
+    word_re = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
+    unique_words = set(word_re.findall(content.lower()))
+    vocabulary_size = len(unique_words)
+    # Richness: unique words / total words (higher = more diverse vocabulary)
+    vocabulary_richness = vocabulary_size / max(word_count, 1)
+
+    # --- Link density (external references) ---
+    link_count = len(re.findall(r"\[.*?\]\(.*?\)|https?://\S+", content))
+
+    # --- Table presence ---
+    table_rows = len(re.findall(r"(?m)^\|.*\|$", content))
+
+    return {
+        "word_count": word_count,
+        "line_count": total_lines,
+        "heading_count": total_headings,
+        "max_heading_depth": max_heading_depth,
+        "heading_counts_by_level": heading_counts,
+        "list_item_count": list_items,
+        "imperative_line_count": imperative_lines,
+        "rule_density": rule_density,
+        "code_block_count": total_code_blocks,
+        "vocabulary_size": vocabulary_size,
+        "vocabulary_richness": round(vocabulary_richness, 4),
+        "link_count": link_count,
+        "table_row_count": table_rows,
+    }
