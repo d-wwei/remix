@@ -17,6 +17,33 @@ def _load_json_arg(value: str) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _load_sources_arg(value: str) -> list:
+    """Parse the --sources argument.
+
+    Accepts:
+    - Inline JSON (object or array)
+    - A path to a JSON file
+    - A bare GitHub repository URL (``https://github.com/owner/repo``),
+      which is automatically wrapped into
+      ``[{"kind": "github_repo", "url": "..."}]``
+    """
+    from remix.sources import is_github_repo_url
+
+    stripped = value.strip()
+
+    # Fast path: bare GitHub repo URL on the command line.
+    if is_github_repo_url(stripped):
+        return [{"kind": "github_repo", "url": stripped}]
+
+    # Delegate to the standard JSON loader.
+    result = _load_json_arg(value)
+
+    # Wrap a single source dict in a list for convenience.
+    if isinstance(result, dict):
+        return [result]
+    return result
+
+
 def _resolve_evolution(args: argparse.Namespace) -> bool | object:
     """Resolve evolution flag: default (auto), or explicit disable."""
     from remix.runtime import _SENTINEL
@@ -35,7 +62,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
     runtime = _make_runtime(args, output_root=args.output)
     summary = runtime.run(
         brief=_load_json_arg(args.brief),
-        sources=_load_json_arg(args.sources),
+        sources=_load_sources_arg(args.sources),
         selected_strategy_id=args.strategy,
     )
     summary["evolution"] = runtime.evolution_status
@@ -47,7 +74,7 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
     """Run only the intake + analysis phase. Outputs per-source scores."""
     runtime = _make_runtime(args)
     brief = _load_json_arg(args.brief)
-    sources = _load_json_arg(args.sources)
+    sources = _load_sources_arg(args.sources)
     target_profile = runtime.profile_registry.resolve(brief)
     normalized = runtime.source_adapter.normalize_sources(sources, brief)
     reports = runtime.source_analyzer.analyze_sources(
@@ -75,7 +102,7 @@ def _cmd_compare(args: argparse.Namespace) -> None:
     """Run intake + analysis + comparison. Outputs rankings and strategies."""
     runtime = _make_runtime(args)
     brief = _load_json_arg(args.brief)
-    sources = _load_json_arg(args.sources)
+    sources = _load_sources_arg(args.sources)
     target_profile = runtime.profile_registry.resolve(brief)
     normalized = runtime.source_adapter.normalize_sources(sources, brief)
     reports = runtime.source_analyzer.analyze_sources(
@@ -133,7 +160,7 @@ def main(argv: list[str] | None = None) -> None:
     # --- run ---
     run_parser = sub.add_parser("run", help="Run the full remix pipeline")
     run_parser.add_argument("--brief", required=True, help="Brief as inline JSON or path to JSON file")
-    run_parser.add_argument("--sources", required=True, help="Sources as inline JSON or path to JSON file")
+    run_parser.add_argument("--sources", required=True, help="Sources as inline JSON, path to JSON file, or a GitHub repo URL")
     run_parser.add_argument("--strategy", default=None, help="Strategy ID to select (auto-selects best if omitted)")
     run_parser.add_argument("--output", default=None, help="Output root directory (default: .remix/)")
     _add_evolution_flag(run_parser)
@@ -141,13 +168,13 @@ def main(argv: list[str] | None = None) -> None:
     # --- analyze ---
     analyze_parser = sub.add_parser("analyze", help="Analyze sources without building (scores only)")
     analyze_parser.add_argument("--brief", required=True, help="Brief as inline JSON or path to JSON file")
-    analyze_parser.add_argument("--sources", required=True, help="Sources as inline JSON or path to JSON file")
+    analyze_parser.add_argument("--sources", required=True, help="Sources as inline JSON, path to JSON file, or a GitHub repo URL")
     _add_evolution_flag(analyze_parser)
 
     # --- compare ---
     compare_parser = sub.add_parser("compare", help="Analyze and compare sources (rankings + strategies)")
     compare_parser.add_argument("--brief", required=True, help="Brief as inline JSON or path to JSON file")
-    compare_parser.add_argument("--sources", required=True, help="Sources as inline JSON or path to JSON file")
+    compare_parser.add_argument("--sources", required=True, help="Sources as inline JSON, path to JSON file, or a GitHub repo URL")
     _add_evolution_flag(compare_parser)
 
     # --- profiles ---
