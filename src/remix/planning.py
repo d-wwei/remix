@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Sequence
 
@@ -37,26 +38,41 @@ class SourceAnalyzer:
         artifact_types = source.get("artifact_types", [])
         target_match = 1 if target_profile["profile_id"] in artifact_types else 0
 
+        # Extract URL content signals for richer scoring when available.
+        # These are None for non-URL sources, so the original formulas remain unchanged.
+        url_signals = source.get("url_content_signals") or {}
+
+        # Build URL-derived score adjustments (all zero when url_signals is empty).
+        url_ext = _url_extensibility_adj(url_signals)
+        url_struct = _url_structural_clarity_adj(url_signals)
+        url_api = _url_api_coherence_adj(url_signals)
+        url_obj = _url_objective_coverage_adj(url_signals, overlap)
+        url_maint = _url_maintainability_adj(url_signals)
+        url_oper = _url_operator_experience_adj(url_signals)
+        url_ambig = _url_ambiguity_reduction_adj(url_signals)
+
         scores = {
             # --- Content quality & task relevance (wide range, high discrimination) ---
             "task_fit": _bounded_score(0.5 + overlap / 1.5 + target_match * 1.5),
-            "objective_coverage": _bounded_score(0.5 + min(overlap, 8) / 1.2),
-            "extensibility": _bounded_score(0.8 + min(len(source.get("units", [])), 8) / 3.0),
-            "api_coherence": _bounded_score(0.8 + min(len([unit for unit in source.get("units", []) if unit["kind"] in {"class", "function", "export"}]), 6) * 0.6),
+            "objective_coverage": _bounded_score(0.5 + min(overlap, 8) / 1.2 + url_obj),
+            "extensibility": _bounded_score(0.8 + min(len(source.get("units", [])), 8) / 3.0 + url_ext),
+            "api_coherence": _bounded_score(0.8 + min(len([unit for unit in source.get("units", []) if unit["kind"] in {"class", "function", "export"}]), 6) * 0.6 + url_api),
             # --- Structural & operational (moderate range) ---
             "structural_clarity": _bounded_score(
                 1.0
                 + (1.2 if source.get("docs_presence") else 0.0)
                 + (0.8 if source.get("manifest_presence") else 0.0)
                 + (0.5 if source.get("entrypoints") else 0.0)
+                + url_struct
             ),
             "maintainability": _bounded_score(
                 1.2
                 + (1.0 if source.get("docs_presence") else 0.0)
                 + (1.0 if source.get("tests_presence") else 0.0)
                 + (0.6 if source.get("metadata_quality") == "high" else 0.0)
+                + url_maint
             ),
-            "operator_experience": _bounded_score(1.2 + (1.5 if source.get("docs_presence") else 0.0) + (0.8 if source.get("entrypoints") else 0.0)),
+            "operator_experience": _bounded_score(1.2 + (1.5 if source.get("docs_presence") else 0.0) + (0.8 if source.get("entrypoints") else 0.0) + url_oper),
             "compatibility_risk": _bounded_score(3.5 - min(len(source.get("operational_risk_signals", [])), 4) * 0.7),
             "integration_fit": _bounded_score(2.1 + (1.2 if source.get("entrypoints") else 0.0)),
             # --- Compliance & safety (compressed range, lower base) ---
@@ -69,7 +85,7 @@ class SourceAnalyzer:
             "skill_se_kit_compatibility": _bounded_score(2.5 + (1.5 if "skill" in artifact_types else 0.0)),
             "governor_readiness": _bounded_score(2.0 + (1.5 if source.get("manifest_presence") else 0.0) + (0.8 if source.get("tests_presence") else 0.0)),
             "protocol_compatibility": _bounded_score(2.0 + (1.8 if "protocol" in artifact_types else 0.0)),
-            "ambiguity_reduction": _bounded_score(2.2 + (1.0 if source.get("metadata_quality") == "high" else 0.0)),
+            "ambiguity_reduction": _bounded_score(2.2 + (1.0 if source.get("metadata_quality") == "high" else 0.0) + url_ambig),
             "rollout_safety": _bounded_score(2.0 + (1.5 if "feature" in artifact_types else 0.0) + (0.5 if source.get("tests_presence") else 0.0)),
         }
 
@@ -565,3 +581,151 @@ def _provenance_notes(source: Dict[str, Any]) -> List[str]:
     else:
         notes.append("Metadata gaps require reviewer attention.")
     return notes
+
+
+# ---------------------------------------------------------------------------
+# URL content signal adjustments
+# ---------------------------------------------------------------------------
+# Each function returns 0.0 when url_signals is empty (non-URL sources),
+# preserving backward compatibility.  When url_signals is present, the
+# adjustment is a continuous value derived from the content analysis so that
+# different URL sources receive different scores.
+# ---------------------------------------------------------------------------
+
+
+def _url_extensibility_adj(url_signals: Dict[str, Any]) -> float:
+    """Longer, more structured content is more extensible.
+
+    Uses word_count (content volume) and heading_count (section decomposability)
+    to produce an adjustment in roughly [-0.3, +1.5].
+    """
+    if not url_signals:
+        return 0.0
+    word_count = url_signals.get("word_count", 0)
+    heading_count = url_signals.get("heading_count", 0)
+    list_items = url_signals.get("list_item_count", 0)
+    # word_count contribution: logarithmic, caps around 1.0 for ~2000 words
+    wc_adj = min(1.0, math.log1p(word_count) / math.log1p(2000))
+    # heading contribution: more sections = easier to extend
+    hd_adj = min(0.5, heading_count * 0.05)
+    # list items indicate modular instructions
+    li_adj = min(0.3, list_items * 0.01)
+    return wc_adj * 0.6 + hd_adj + li_adj
+
+
+def _url_structural_clarity_adj(url_signals: Dict[str, Any]) -> float:
+    """Heading depth, heading count, and table presence indicate structure.
+
+    Returns an adjustment in roughly [-0.2, +1.5].
+    """
+    if not url_signals:
+        return 0.0
+    heading_count = url_signals.get("heading_count", 0)
+    max_depth = url_signals.get("max_heading_depth", 0)
+    table_rows = url_signals.get("table_row_count", 0)
+    line_count = url_signals.get("line_count", 0)
+
+    # More headings = better organized (diminishing returns past 15)
+    hd_adj = min(0.8, heading_count * 0.06)
+    # Deeper heading hierarchy = richer structure
+    depth_adj = min(0.4, max_depth * 0.1)
+    # Tables imply structured data presentation
+    table_adj = min(0.3, table_rows * 0.02)
+    # Penalty for very short content with no structure
+    if line_count < 20 and heading_count == 0:
+        return -0.2
+    return hd_adj + depth_adj + table_adj
+
+
+def _url_api_coherence_adj(url_signals: Dict[str, Any]) -> float:
+    """Code blocks signal API examples or interface definitions.
+
+    Returns an adjustment in roughly [0.0, +1.2].
+    """
+    if not url_signals:
+        return 0.0
+    code_blocks = url_signals.get("code_block_count", 0)
+    link_count = url_signals.get("link_count", 0)
+    # Code blocks strongly signal API content
+    cb_adj = min(0.8, code_blocks * 0.15)
+    # Links suggest cross-references to API docs
+    lk_adj = min(0.4, link_count * 0.02)
+    return cb_adj + lk_adj
+
+
+def _url_objective_coverage_adj(url_signals: Dict[str, Any], overlap: int) -> float:
+    """Vocabulary richness and rule density expand objective coverage beyond keyword overlap.
+
+    Returns an adjustment in roughly [0.0, +1.0].
+    """
+    if not url_signals:
+        return 0.0
+    vocab_richness = url_signals.get("vocabulary_richness", 0.0)
+    rule_density = url_signals.get("rule_density", 0)
+    vocab_size = url_signals.get("vocabulary_size", 0)
+    # Richer vocabulary = broader topic coverage
+    vr_adj = min(0.5, vocab_richness * 1.5)
+    # More rules/instructions = more objectives addressed
+    rd_adj = min(0.3, rule_density * 0.005)
+    # Large vocabulary size (absolute) adds a small bonus
+    vs_adj = min(0.2, vocab_size / 500.0)
+    return vr_adj + rd_adj + vs_adj
+
+
+def _url_maintainability_adj(url_signals: Dict[str, Any]) -> float:
+    """Well-structured content with rules is easier to maintain.
+
+    Returns an adjustment in roughly [-0.2, +0.8].
+    """
+    if not url_signals:
+        return 0.0
+    heading_count = url_signals.get("heading_count", 0)
+    rule_density = url_signals.get("rule_density", 0)
+    word_count = url_signals.get("word_count", 0)
+
+    # Headings make content navigable
+    hd_adj = min(0.3, heading_count * 0.03)
+    # Explicit rules are easier to maintain than prose
+    rd_adj = min(0.3, rule_density * 0.005)
+    # Very short content may be incomplete
+    if word_count < 100:
+        return -0.2 + hd_adj
+    return hd_adj + rd_adj
+
+
+def _url_operator_experience_adj(url_signals: Dict[str, Any]) -> float:
+    """Content with code examples, lists, and headings is more operator-friendly.
+
+    Returns an adjustment in roughly [0.0, +0.8].
+    """
+    if not url_signals:
+        return 0.0
+    code_blocks = url_signals.get("code_block_count", 0)
+    list_items = url_signals.get("list_item_count", 0)
+    heading_count = url_signals.get("heading_count", 0)
+    # Code examples help operators
+    cb_adj = min(0.3, code_blocks * 0.08)
+    # Step-by-step lists help operators
+    li_adj = min(0.3, list_items * 0.01)
+    # Navigable headings help operators
+    hd_adj = min(0.2, heading_count * 0.025)
+    return cb_adj + li_adj + hd_adj
+
+
+def _url_ambiguity_reduction_adj(url_signals: Dict[str, Any]) -> float:
+    """Imperative language and explicit rules reduce ambiguity.
+
+    Returns an adjustment in roughly [0.0, +0.8].
+    """
+    if not url_signals:
+        return 0.0
+    imperative_lines = url_signals.get("imperative_line_count", 0)
+    rule_density = url_signals.get("rule_density", 0)
+    table_rows = url_signals.get("table_row_count", 0)
+    # Imperative language is unambiguous
+    imp_adj = min(0.3, imperative_lines * 0.015)
+    # High rule density = less room for interpretation
+    rd_adj = min(0.3, rule_density * 0.004)
+    # Tables clarify structured data
+    tbl_adj = min(0.2, table_rows * 0.015)
+    return imp_adj + rd_adj + tbl_adj
