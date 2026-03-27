@@ -38,7 +38,12 @@ class SourceAnalyzer:
         target_match = 1 if target_profile["profile_id"] in artifact_types else 0
 
         scores = {
-            "task_fit": min(5.0, 1.0 + overlap / 2.5 + target_match),
+            # --- Content quality & task relevance (wide range, high discrimination) ---
+            "task_fit": _bounded_score(0.5 + overlap / 1.5 + target_match * 1.5),
+            "objective_coverage": _bounded_score(0.5 + min(overlap, 8) / 1.2),
+            "extensibility": _bounded_score(0.8 + min(len(source.get("units", [])), 8) / 3.0),
+            "api_coherence": _bounded_score(0.8 + min(len([unit for unit in source.get("units", []) if unit["kind"] in {"class", "function", "export"}]), 6) * 0.6),
+            # --- Structural & operational (moderate range) ---
             "structural_clarity": _bounded_score(
                 1.0
                 + (1.2 if source.get("docs_presence") else 0.0)
@@ -51,22 +56,21 @@ class SourceAnalyzer:
                 + (1.0 if source.get("tests_presence") else 0.0)
                 + (0.6 if source.get("metadata_quality") == "high" else 0.0)
             ),
-            "extensibility": _bounded_score(1.4 + min(len(source.get("units", [])), 8) / 4.0),
-            "testability": _bounded_score(1.0 + (2.4 if source.get("tests_presence") else 0.0) + target_match * 0.6),
-            "compatibility_risk": _bounded_score(4.5 - min(len(source.get("operational_risk_signals", [])), 4) * 0.8),
             "operator_experience": _bounded_score(1.2 + (1.5 if source.get("docs_presence") else 0.0) + (0.8 if source.get("entrypoints") else 0.0)),
-            "maintenance_cost": _bounded_score(4.3 - min(source.get("maturity_signals", {}).get("file_count", 0), 40) / 20.0),
-            "provenance_safety": _bounded_score(4.6 if source.get("license") != "unknown" else 2.0),
+            "compatibility_risk": _bounded_score(3.5 - min(len(source.get("operational_risk_signals", [])), 4) * 0.7),
+            "integration_fit": _bounded_score(2.1 + (1.2 if source.get("entrypoints") else 0.0)),
+            # --- Compliance & safety (compressed range, lower base) ---
+            "testability": _bounded_score(1.0 + (2.0 if source.get("tests_presence") else 0.0) + target_match * 0.5),
+            "maintenance_cost": _bounded_score(3.5 - min(source.get("maturity_signals", {}).get("file_count", 0), 40) / 20.0),
+            "provenance_safety": _bounded_score(3.0 if source.get("license") != "unknown" else 1.5),
+            "dependency_safety": _bounded_score(3.5 - min(source.get("dependency_signals", {}).get("dependency_mentions", 0), 6) * 0.3),
+            "dependency_realism": _bounded_score(3.0 - min(source.get("dependency_signals", {}).get("dependency_mentions", 0), 5) * 0.2),
+            # --- Profile-specific (unchanged, only active when profile weights include them) ---
             "skill_se_kit_compatibility": _bounded_score(2.5 + (1.5 if "skill" in artifact_types else 0.0)),
             "governor_readiness": _bounded_score(2.0 + (1.5 if source.get("manifest_presence") else 0.0) + (0.8 if source.get("tests_presence") else 0.0)),
             "protocol_compatibility": _bounded_score(2.0 + (1.8 if "protocol" in artifact_types else 0.0)),
             "ambiguity_reduction": _bounded_score(2.2 + (1.0 if source.get("metadata_quality") == "high" else 0.0)),
-            "api_coherence": _bounded_score(1.8 + min(len([unit for unit in source.get("units", []) if unit["kind"] in {"class", "function", "export"}]), 4) * 0.6),
-            "dependency_safety": _bounded_score(4.5 - min(source.get("dependency_signals", {}).get("dependency_mentions", 0), 6) * 0.3),
             "rollout_safety": _bounded_score(2.0 + (1.5 if "feature" in artifact_types else 0.0) + (0.5 if source.get("tests_presence") else 0.0)),
-            "integration_fit": _bounded_score(2.1 + (1.2 if source.get("entrypoints") else 0.0)),
-            "objective_coverage": _bounded_score(1.8 + min(overlap, 8) / 2.5),
-            "dependency_realism": _bounded_score(3.8 - min(source.get("dependency_signals", {}).get("dependency_mentions", 0), 5) * 0.2),
         }
 
         # Apply fixed score overrides from the brief's scoring_overrides.

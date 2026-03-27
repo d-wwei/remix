@@ -5,15 +5,20 @@ from typing import Any, Dict, List
 
 
 DEFAULT_WEIGHTS = {
-    "task_fit": 1.2,
-    "structural_clarity": 1.0,
-    "maintainability": 1.0,
-    "extensibility": 0.9,
-    "testability": 0.9,
-    "compatibility_risk": 1.0,
-    "operator_experience": 0.7,
-    "maintenance_cost": 0.7,
-    "provenance_safety": 1.1,
+    # --- Content quality & task relevance (dominant) ---
+    "task_fit": 2.5,
+    "objective_coverage": 2.0,
+    "extensibility": 1.2,
+    "api_coherence": 1.0,
+    # --- Structural & operational (minor, user handles these) ---
+    "structural_clarity": 0.3,
+    "maintainability": 0.3,
+    "operator_experience": 0.2,
+    "compatibility_risk": 0.2,
+    # --- Compliance (off by default; user raises via scoring_overrides when needed) ---
+    "testability": 0.0,
+    "maintenance_cost": 0.0,
+    "provenance_safety": 0.0,
 }
 
 
