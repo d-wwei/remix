@@ -1,14 +1,480 @@
 from __future__ import annotations
 
+import re
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from remix.utils import DEFAULT_PROTOCOL_VERSION as SUPPORTED_PROTOCOL_VERSION, compact_excerpt, generate_id, markdown_bullets, skillify, slugify, utc_now_iso
+from remix.utils import DEFAULT_PROTOCOL_VERSION as SUPPORTED_PROTOCOL_VERSION, compact_excerpt, generate_id, keyword_overlap, markdown_bullets, skillify, slugify, top_words, utc_now_iso
+
+
+# ---------------------------------------------------------------------------
+# HeuristicContentSynthesizer -- the core enhancement
+# ---------------------------------------------------------------------------
+
+class HeuristicContentSynthesizer:
+    """Heuristic-based content synthesizer that produces rich structured outlines.
+
+    Implements the ContentSynthesizer protocol from interfaces.py without
+    requiring any external LLM API. Instead, it uses structural analysis of
+    source units, strategy decisions, and keyword overlap to produce:
+
+    1. A content outline with merged sections, source-tagged bullet points,
+       conflict markers, and adaptation notes.
+    2. A synthesis guide with explicit operator instructions for completing
+       the fusion.
+    """
+
+    def generate_content_outline(
+        self,
+        *,
+        brief: Dict[str, Any],
+        target_profile: Dict[str, Any],
+        selected_strategy: Dict[str, Any],
+        normalized_sources: Sequence[Dict[str, Any]],
+        analysis_reports: Sequence[Dict[str, Any]],
+    ) -> str:
+        """Generate a structured content outline from analysis data.
+
+        The outline contains:
+        - Merged section headings derived from source structures
+        - Source-tagged bullet points of key content per section
+        - CONFLICT markers where sources cover the same topic differently
+        - ADAPT markers where the strategy says to adapt a pattern
+        """
+        source_index = {s["source_id"]: s for s in normalized_sources}
+        analysis_index = {r["source_id"]: r for r in analysis_reports}
+        strategy_source_ids = set(selected_strategy.get("source_ids", []))
+
+        # Phase 1: Collect all conceptual units organized by topic
+        topic_buckets = self._cluster_units_by_topic(
+            normalized_sources, strategy_source_ids
+        )
+
+        # Phase 2: Classify units per strategy (preserve / discard / adapt)
+        classified = self._classify_units(
+            topic_buckets, selected_strategy, source_index, analysis_index
+        )
+
+        # Phase 3: Render the outline
+        lines: List[str] = []
+        lines.append(f"# {brief.get('name', 'Remixed Artifact')} -- Content Outline")
+        lines.append("")
+        lines.append(f"> Target: `{target_profile['profile_id']}` | "
+                      f"Strategy: `{selected_strategy['strategy_id']}` | "
+                      f"Sources: {', '.join(selected_strategy['source_ids'])}")
+        lines.append("")
+
+        # Purpose section from brief
+        lines.append("## Purpose")
+        lines.append("")
+        lines.append(brief.get("target_job", "Deliver the requested outcome."))
+        lines.append("")
+        if brief.get("success_criteria"):
+            lines.append("**Success criteria:**")
+            for criterion in brief["success_criteria"]:
+                lines.append(f"- {criterion}")
+            lines.append("")
+
+        # Strategy summary
+        lines.append("## Strategy Decisions")
+        lines.append("")
+        lines.append("### Preserve")
+        for item in selected_strategy.get("preserve", []):
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("### Discard")
+        for item in selected_strategy.get("discard", []):
+            lines.append(f"- ~~{item}~~")
+        lines.append("")
+        lines.append("### Adapt")
+        for item in selected_strategy.get("adapt", []):
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("### Introduce (new)")
+        for item in selected_strategy.get("introduce", []):
+            lines.append(f"- {item}")
+        lines.append("")
+
+        # Merged content sections
+        lines.append("---")
+        lines.append("")
+        lines.append("## Synthesized Content Sections")
+        lines.append("")
+
+        for topic, entries in classified.items():
+            lines.append(f"### {topic}")
+            lines.append("")
+
+            # Check for conflicts (multiple sources covering same topic)
+            contributing_sources = list({e["source_id"] for e in entries})
+            if len(contributing_sources) > 1:
+                lines.append(
+                    f"<!-- CONFLICT: Multiple sources cover this topic: "
+                    f"{', '.join(contributing_sources)}. Manual fusion needed. -->"
+                )
+                lines.append("")
+
+            for entry in entries:
+                status_tag = entry["status"].upper()
+                source_tag = f"[{entry['source_id']}]"
+
+                if entry["status"] == "discard":
+                    lines.append(f"- ~~{source_tag} {entry['summary']}~~ `{status_tag}`")
+                elif entry["status"] == "adapt":
+                    lines.append(f"- {source_tag} {entry['summary']} `{status_tag}`")
+                    if entry.get("adaptation_note"):
+                        lines.append(f"  - *Adaptation:* {entry['adaptation_note']}")
+                else:
+                    lines.append(f"- {source_tag} {entry['summary']} `PRESERVE`")
+
+            lines.append("")
+
+        # Source strengths summary
+        lines.append("## Source Contribution Summary")
+        lines.append("")
+        for source_id in selected_strategy["source_ids"]:
+            report = analysis_index.get(source_id, {})
+            source = source_index.get(source_id, {})
+            lines.append(f"### {source_id}")
+            lines.append("")
+            lines.append(f"**Scope:** {report.get('scope', 'unknown')}")
+            lines.append("")
+            if report.get("strengths"):
+                lines.append("**Strengths:**")
+                for s in report["strengths"][:4]:
+                    lines.append(f"- {s}")
+                lines.append("")
+            if report.get("reusable_patterns"):
+                lines.append("**Reusable patterns:**")
+                for p in report["reusable_patterns"][:5]:
+                    lines.append(f"- `{p['kind']}` **{p['name']}** ({p['unit_id']})")
+                lines.append("")
+            if report.get("weaknesses"):
+                lines.append("**Weaknesses (to mitigate):**")
+                for w in report["weaknesses"][:3]:
+                    lines.append(f"- {w}")
+                lines.append("")
+
+        # Risks and open questions
+        if selected_strategy.get("risks"):
+            lines.append("## Risks")
+            lines.append("")
+            for risk in selected_strategy["risks"]:
+                lines.append(f"- {risk}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def generate_synthesis_guide(
+        self,
+        *,
+        brief: Dict[str, Any],
+        target_profile: Dict[str, Any],
+        selected_strategy: Dict[str, Any],
+        normalized_sources: Sequence[Dict[str, Any]],
+        analysis_reports: Sequence[Dict[str, Any]],
+        comparison: Dict[str, Any],
+    ) -> str:
+        """Generate a synthesis guide for the LLM operator.
+
+        The guide includes:
+        - Which sections need manual fusion
+        - What content from each source goes where
+        - What to preserve verbatim vs what to rewrite
+        - Priority order based on source rankings
+        """
+        source_index = {s["source_id"]: s for s in normalized_sources}
+        analysis_index = {r["source_id"]: r for r in analysis_reports}
+        rankings = comparison.get("source_rankings", [])
+
+        lines: List[str] = []
+        lines.append("# Synthesis Guide")
+        lines.append("")
+        lines.append(f"> For: **{brief.get('name', 'Remixed Artifact')}** | "
+                      f"Profile: `{target_profile['profile_id']}` | "
+                      f"Strategy: `{selected_strategy['name']}`")
+        lines.append("")
+        lines.append("This guide provides explicit instructions for completing the "
+                      "content synthesis. Use it alongside the content outline.")
+        lines.append("")
+
+        # Section 1: Priority order
+        lines.append("## 1. Source Priority Order")
+        lines.append("")
+        lines.append("When sources conflict, prefer content from higher-ranked sources.")
+        lines.append("")
+        lines.append("| Rank | Source | Score | Status | Key Strengths |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for i, ranking in enumerate(rankings, 1):
+            sid = ranking["source_id"]
+            score = ranking.get("overall_score", 0)
+            status = ranking.get("status", "unknown")
+            strengths = ranking.get("rationales", {}).get("strengths", [])
+            strength_text = "; ".join(strengths[:2]) if strengths else "none noted"
+            lines.append(f"| {i} | {sid} | {score:.2f} | {status} | {strength_text} |")
+        lines.append("")
+
+        # Section 2: Section-by-section instructions
+        lines.append("## 2. Section-by-Section Instructions")
+        lines.append("")
+
+        strategy_source_ids = set(selected_strategy.get("source_ids", []))
+        topic_buckets = self._cluster_units_by_topic(normalized_sources, strategy_source_ids)
+        classified = self._classify_units(
+            topic_buckets, selected_strategy, source_index, analysis_index
+        )
+
+        for topic, entries in classified.items():
+            contributing_sources = list({e["source_id"] for e in entries})
+            preserve_entries = [e for e in entries if e["status"] == "preserve"]
+            adapt_entries = [e for e in entries if e["status"] == "adapt"]
+            discard_entries = [e for e in entries if e["status"] == "discard"]
+
+            lines.append(f"### {topic}")
+            lines.append("")
+
+            if len(contributing_sources) > 1:
+                lines.append(f"**ACTION REQUIRED: MANUAL FUSION** -- "
+                              f"{len(contributing_sources)} sources contribute to this section.")
+                lines.append("")
+
+                # Determine which source ranks higher for conflict resolution
+                source_rank = {
+                    r["source_id"]: i
+                    for i, r in enumerate(rankings, 1)
+                }
+                sorted_contributors = sorted(
+                    contributing_sources,
+                    key=lambda sid: source_rank.get(sid, 999)
+                )
+                lines.append(f"**Recommended lead source:** `{sorted_contributors[0]}`")
+                lines.append("")
+            elif len(contributing_sources) == 1:
+                lines.append(f"**Single source:** `{contributing_sources[0]}` -- "
+                              "straightforward extraction.")
+                lines.append("")
+
+            if preserve_entries:
+                lines.append("**Preserve verbatim (or near-verbatim):**")
+                for e in preserve_entries:
+                    lines.append(f"- From `{e['source_id']}`: {e['summary']}")
+                lines.append("")
+
+            if adapt_entries:
+                lines.append("**Adapt (rewrite to fit target):**")
+                for e in adapt_entries:
+                    note = e.get("adaptation_note", "Rewrite to match target profile conventions.")
+                    lines.append(f"- From `{e['source_id']}`: {e['summary']}")
+                    lines.append(f"  - *How to adapt:* {note}")
+                lines.append("")
+
+            if discard_entries:
+                lines.append("**Discard (do not include):**")
+                for e in discard_entries:
+                    lines.append(f"- ~~From `{e['source_id']}`: {e['summary']}~~")
+                lines.append("")
+
+        # Section 3: Verbatim preservation checklist
+        lines.append("## 3. Verbatim Preservation Checklist")
+        lines.append("")
+        lines.append("These items from the strategy MUST appear in the final output:")
+        lines.append("")
+        for item in selected_strategy.get("preserve", []):
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+
+        # Section 4: Adaptation checklist
+        lines.append("## 4. Adaptation Checklist")
+        lines.append("")
+        lines.append("These items need transformation before inclusion:")
+        lines.append("")
+        for item in selected_strategy.get("adapt", []):
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+
+        # Section 5: Quality gates
+        lines.append("## 5. Quality Gates Before Finalizing")
+        lines.append("")
+        lines.append("- [ ] All `CONFLICT` markers in the content outline are resolved")
+        lines.append("- [ ] All `ADAPT` items have been rewritten for the target profile")
+        lines.append("- [ ] No `DISCARD` content leaked into the final document")
+        lines.append("- [ ] Success criteria from the brief are addressed:")
+        for criterion in brief.get("success_criteria", ["(none specified)"]):
+            lines.append(f"  - [ ] {criterion}")
+        lines.append("- [ ] Source attribution is accurate in provenance.json")
+        lines.append("")
+
+        # Section 6: Risks to watch for
+        if selected_strategy.get("risks"):
+            lines.append("## 6. Risks to Watch For")
+            lines.append("")
+            for risk in selected_strategy["risks"]:
+                lines.append(f"- {risk}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # ---- internal helpers ----
+
+    def _cluster_units_by_topic(
+        self,
+        normalized_sources: Sequence[Dict[str, Any]],
+        strategy_source_ids: set,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Group conceptual units from all selected sources by topic.
+
+        Uses a combination of:
+        - Heading-level grouping (units with kind=heading keep their name as topic)
+        - Keyword-based clustering (units with overlapping keywords get merged)
+        - Kind-based fallback (code units -> "Code Components", etc.)
+        """
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        for source in normalized_sources:
+            sid = source["source_id"]
+            if sid not in strategy_source_ids:
+                continue
+            for unit in source.get("units", []):
+                topic = self._topic_for_unit(unit)
+                buckets[topic].append({
+                    "source_id": sid,
+                    "unit_id": unit["unit_id"],
+                    "kind": unit["kind"],
+                    "name": unit["name"],
+                    "summary": unit.get("summary", unit["name"]),
+                })
+
+        # Merge small buckets into "Other Content"
+        merged: Dict[str, List[Dict[str, Any]]] = {}
+        overflow: List[Dict[str, Any]] = []
+        for topic, entries in buckets.items():
+            if len(entries) >= 1 and len(topic) > 2:
+                merged[topic] = entries
+            else:
+                overflow.extend(entries)
+        if overflow:
+            merged["Other Content"] = overflow
+
+        return merged
+
+    def _topic_for_unit(self, unit: Dict[str, Any]) -> str:
+        """Determine the topic name for a conceptual unit."""
+        kind = unit["kind"]
+        name = unit["name"]
+
+        if kind == "heading":
+            # Use the heading text as the topic
+            cleaned = re.sub(r"^#+\s*", "", name).strip()
+            return cleaned or "Overview"
+        if kind in ("class", "function", "export"):
+            return "Code Components"
+        if kind == "json-key":
+            return "Data Structure"
+        if kind == "file":
+            # Group files by directory or extension
+            parts = name.split("/")
+            if len(parts) > 1:
+                return f"Files: {parts[0]}"
+            return "Files"
+        if kind == "paragraph":
+            # Use first few words as topic
+            words = name.split()[:4]
+            return " ".join(words) if words else "Content"
+        return "General"
+
+    def _classify_units(
+        self,
+        topic_buckets: Dict[str, List[Dict[str, Any]]],
+        selected_strategy: Dict[str, Any],
+        source_index: Dict[str, Dict[str, Any]],
+        analysis_index: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Classify each unit as preserve/discard/adapt based on strategy."""
+        preserve_keywords = set()
+        for text in selected_strategy.get("preserve", []):
+            preserve_keywords.update(w.lower() for w in re.findall(r"\w+", text) if len(w) > 3)
+
+        discard_keywords = set()
+        for text in selected_strategy.get("discard", []):
+            discard_keywords.update(w.lower() for w in re.findall(r"\w+", text) if len(w) > 3)
+
+        adapt_names = set()
+        for text in selected_strategy.get("adapt", []):
+            # "Adapt X from source-Y" -> extract X
+            match = re.match(r"Adapt\s+(.+?)\s+from\s+", text)
+            if match:
+                adapt_names.add(match.group(1).lower())
+            adapt_names.update(w.lower() for w in re.findall(r"\w+", text) if len(w) > 3)
+
+        classified: Dict[str, List[Dict[str, Any]]] = {}
+        for topic, entries in topic_buckets.items():
+            classified_entries = []
+            for entry in entries:
+                entry_words = set(
+                    w.lower() for w in re.findall(r"\w+", entry["summary"]) if len(w) > 3
+                )
+                name_lower = entry["name"].lower()
+
+                # Check adapt first (most specific)
+                if name_lower in adapt_names or (adapt_names & entry_words):
+                    status = "adapt"
+                    # Generate adaptation note
+                    report = analysis_index.get(entry["source_id"], {})
+                    note = self._generate_adaptation_note(
+                        entry, selected_strategy, source_index.get(entry["source_id"], {})
+                    )
+                elif discard_keywords & entry_words and not (preserve_keywords & entry_words):
+                    status = "discard"
+                    note = None
+                else:
+                    status = "preserve"
+                    note = None
+
+                classified_entries.append({
+                    **entry,
+                    "status": status,
+                    "adaptation_note": note,
+                })
+            classified[topic] = classified_entries
+
+        return classified
+
+    def _generate_adaptation_note(
+        self,
+        entry: Dict[str, Any],
+        selected_strategy: Dict[str, Any],
+        source: Dict[str, Any],
+    ) -> str:
+        """Generate a specific adaptation note for a unit."""
+        kind = entry["kind"]
+        target_shape = selected_strategy.get("expected_output_shape", [])
+
+        if kind in ("class", "function", "export"):
+            return (
+                f"Refactor `{entry['name']}` to fit the target artifact shape "
+                f"({', '.join(target_shape)}). Preserve core logic, update interfaces."
+            )
+        if kind == "heading":
+            return (
+                f"Rewrite section '{entry['name']}' to align with the target profile's "
+                "conventions and terminology."
+            )
+        if kind == "json-key":
+            return (
+                f"Transform the `{entry['name']}` data structure to match the "
+                "target schema requirements."
+            )
+        return (
+            f"Adapt this content from {entry['source_id']} to match the target "
+            "profile's style and requirements."
+        )
 
 
 class TargetBuilder:
-    def __init__(self, validator) -> None:
+    def __init__(self, validator, *, content_synthesizer=None) -> None:
         self.validator = validator
+        self.content_synthesizer = content_synthesizer or HeuristicContentSynthesizer()
 
     def build(
         self,
@@ -20,6 +486,7 @@ class TargetBuilder:
         selected_strategy: Dict[str, Any],
         normalized_sources: Sequence[Dict[str, Any]],
         analysis_reports: Sequence[Dict[str, Any]],
+        comparison: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         source_index = {source["source_id"]: source for source in normalized_sources}
         analysis_index = {report["source_id"]: report for report in analysis_reports}
@@ -55,6 +522,46 @@ class TargetBuilder:
                     analysis_index=analysis_index,
                 )
             )
+
+        # Generate structured content outline and synthesis guide
+        content_outline = self.content_synthesizer.generate_content_outline(
+            brief=brief,
+            target_profile=target_profile,
+            selected_strategy=selected_strategy,
+            normalized_sources=normalized_sources,
+            analysis_reports=analysis_reports,
+        )
+        workspace.write_text(
+            workspace.remixed_output_dir / "docs" / "content_outline.md",
+            content_outline,
+        )
+        outputs.append({
+            "type": "content-outline",
+            "path": "docs/content_outline.md",
+            "summary": "Structured content outline with source-tagged sections, conflict markers, and adaptation notes.",
+        })
+
+        # Build comparison dict for the synthesis guide if not provided
+        if comparison is None:
+            comparison = {"source_rankings": [], "complementarity": []}
+
+        synthesis_guide = self.content_synthesizer.generate_synthesis_guide(
+            brief=brief,
+            target_profile=target_profile,
+            selected_strategy=selected_strategy,
+            normalized_sources=normalized_sources,
+            analysis_reports=analysis_reports,
+            comparison=comparison,
+        )
+        workspace.write_text(
+            workspace.remixed_output_dir / "synthesis_guide.md",
+            synthesis_guide,
+        )
+        outputs.append({
+            "type": "synthesis-guide",
+            "path": "synthesis_guide.md",
+            "summary": "Operator guide for completing content synthesis with priority order and section instructions.",
+        })
 
         docs_outputs = self._build_shared_docs(
             workspace=workspace,
@@ -199,41 +706,163 @@ class TargetBuilder:
         self.validator.validate_manifest(manifest)
         workspace.write_json(workspace.remixed_output_dir / "skill" / "manifest.json", manifest)
 
+        # Collect workflows from analysis reports
         workflows = []
         for source_id in selected_strategy["source_ids"]:
             workflows.extend(analysis_index[source_id]["workflow"][:2])
-        skill_md = "\n".join(
-            [
-                f"# {name}",
-                "",
-                "## Purpose",
-                brief.get("target_job", "Deliver the requested skill outcome."),
-                "",
-                "## Sources",
-                markdown_bullets(selected_strategy["source_ids"]),
-                "",
-                "## Workflow",
-                markdown_bullets(list(dict.fromkeys(workflows))[:6]),
-                "",
-                "## Constraints",
-                markdown_bullets(_brief_constraints(brief)),
-                "",
-                "## Verification",
-                markdown_bullets(
-                    [
-                        "Protocol-compatible manifest validation",
-                        "Scenario smoke checks",
-                        "Source attribution sanity checks",
-                    ]
-                ),
-                "",
-                "## Provenance",
-                "See `../provenance.json` and `../docs/strategy.md` for source influence details.",
-                "",
-                "## Handoff",
-                "This package is ready for local review and optional governed submission through the release bundle.",
-            ]
-        )
+
+        # Collect reusable patterns from analysis
+        all_patterns: List[Dict[str, Any]] = []
+        for source_id in selected_strategy["source_ids"]:
+            report = analysis_index[source_id]
+            for pattern in report.get("reusable_patterns", [])[:4]:
+                all_patterns.append({**pattern, "source_id": source_id})
+
+        # Collect units from sources for richer content
+        all_units_by_source: Dict[str, List[Dict[str, Any]]] = {}
+        for source_id in selected_strategy["source_ids"]:
+            source = source_index[source_id]
+            all_units_by_source[source_id] = source.get("units", [])[:10]
+
+        # Build enriched SKILL.md
+        skill_lines: List[str] = [
+            f"# {name}",
+            "",
+            "## Purpose",
+            "",
+            brief.get("target_job", "Deliver the requested skill outcome."),
+            "",
+        ]
+
+        # Success criteria (if present)
+        if brief.get("success_criteria"):
+            skill_lines.append("### Success Criteria")
+            skill_lines.append("")
+            for criterion in brief["success_criteria"]:
+                skill_lines.append(f"- {criterion}")
+            skill_lines.append("")
+
+        # Source overview with contribution details
+        skill_lines.extend([
+            "## Sources & Contributions",
+            "",
+        ])
+        for source_id in selected_strategy["source_ids"]:
+            report = analysis_index[source_id]
+            skill_lines.append(f"### {source_id}")
+            skill_lines.append("")
+            skill_lines.append(f"**Scope:** {report.get('scope', 'unknown')}")
+            skill_lines.append("")
+            if report.get("strengths"):
+                skill_lines.append("**Key contributions:**")
+                for s in report["strengths"][:3]:
+                    skill_lines.append(f"- {s}")
+                skill_lines.append("")
+            if report.get("reusable_patterns"):
+                skill_lines.append("**Reusable elements:**")
+                for p in report["reusable_patterns"][:4]:
+                    skill_lines.append(f"- `{p['kind']}` **{p['name']}**")
+                skill_lines.append("")
+
+        # Workflow section with actual content
+        skill_lines.extend([
+            "## Workflow",
+            "",
+        ])
+        unique_workflows = list(dict.fromkeys(workflows))[:6]
+        if unique_workflows:
+            skill_lines.append(markdown_bullets(unique_workflows))
+        else:
+            skill_lines.append("- (Derive workflow from source content during synthesis)")
+        skill_lines.append("")
+
+        # Content map -- key conceptual units organized by kind
+        skill_lines.extend([
+            "## Content Map",
+            "",
+            "The following conceptual units from the sources form the basis of this skill:",
+            "",
+        ])
+        units_by_kind: Dict[str, List[str]] = defaultdict(list)
+        for source_id, units in all_units_by_source.items():
+            for unit in units:
+                kind = unit["kind"]
+                summary = unit.get("summary", unit["name"])
+                units_by_kind[kind].append(
+                    f"`[{source_id}]` **{unit['name']}**: {compact_excerpt(summary, max_chars=120)}"
+                )
+        for kind, items in units_by_kind.items():
+            skill_lines.append(f"### {kind.replace('-', ' ').title()}s")
+            skill_lines.append("")
+            for item in items[:6]:
+                skill_lines.append(f"- {item}")
+            skill_lines.append("")
+
+        # Strategy decisions relevant to this skill
+        skill_lines.extend([
+            "## Strategy Decisions",
+            "",
+            f"**Strategy:** `{selected_strategy['strategy_id']}` ({selected_strategy['name']})",
+            "",
+            "### Preserved",
+            markdown_bullets(selected_strategy.get("preserve", ["(none)"])[:5]),
+            "",
+            "### Adapted",
+            markdown_bullets(selected_strategy.get("adapt", ["(none)"])[:5]),
+            "",
+            "### Discarded",
+            markdown_bullets(selected_strategy.get("discard", ["(none)"])[:5]),
+            "",
+            "### Introduced",
+            markdown_bullets(selected_strategy.get("introduce", ["(none)"])[:3]),
+            "",
+        ])
+
+        # Constraints
+        skill_lines.extend([
+            "## Constraints",
+            "",
+            markdown_bullets(_brief_constraints(brief)),
+            "",
+        ])
+
+        # Verification
+        skill_lines.extend([
+            "## Verification",
+            "",
+            markdown_bullets(
+                [
+                    "Protocol-compatible manifest validation",
+                    "Scenario smoke checks",
+                    "Source attribution sanity checks",
+                ]
+            ),
+            "",
+        ])
+
+        # Provenance
+        skill_lines.extend([
+            "## Provenance",
+            "",
+            "See `../provenance.json` and `../docs/strategy.md` for source influence details.",
+            "",
+            "See `../docs/content_outline.md` for the full structured content outline with "
+            "source-tagged sections and conflict markers.",
+            "",
+            "See `../synthesis_guide.md` for step-by-step instructions on completing "
+            "the content synthesis.",
+            "",
+        ])
+
+        # Handoff
+        skill_lines.extend([
+            "## Handoff",
+            "",
+            "This package is ready for local review and optional governed submission "
+            "through the release bundle.",
+        ])
+
+        skill_md = "\n".join(skill_lines)
         workspace.write_text(workspace.remixed_output_dir / "skill" / "SKILL.md", skill_md)
         workspace.write_text(
             workspace.remixed_output_dir / "skill" / "tests.md",

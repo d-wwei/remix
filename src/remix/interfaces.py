@@ -56,3 +56,45 @@ class Analyzer(Protocol):
         brief: Dict[str, Any],
         target_profile: Dict[str, Any],
     ) -> List[Dict[str, Any]]: ...
+
+
+@runtime_checkable
+class ContentSynthesizer(Protocol):
+    """Pluggable content synthesis backend for the build phase.
+
+    The default implementation (HeuristicContentSynthesizer in builder.py) uses
+    structural analysis to produce rich content outlines from source units.
+    Replace with an LLM-backed implementation for true content fusion.
+
+    The synthesizer receives all analysis data and the selected strategy, and
+    produces two outputs:
+    - A structured content outline (merged sections with source-tagged content)
+    - A synthesis guide (instructions for the operator to complete the fusion)
+    """
+
+    def generate_content_outline(
+        self,
+        *,
+        brief: Dict[str, Any],
+        target_profile: Dict[str, Any],
+        selected_strategy: Dict[str, Any],
+        normalized_sources: Sequence[Dict[str, Any]],
+        analysis_reports: Sequence[Dict[str, Any]],
+    ) -> str:
+        """Return a Markdown content outline with merged sections, source-tagged
+        bullet points, conflict markers, and adaptation notes."""
+        ...
+
+    def generate_synthesis_guide(
+        self,
+        *,
+        brief: Dict[str, Any],
+        target_profile: Dict[str, Any],
+        selected_strategy: Dict[str, Any],
+        normalized_sources: Sequence[Dict[str, Any]],
+        analysis_reports: Sequence[Dict[str, Any]],
+        comparison: Dict[str, Any],
+    ) -> str:
+        """Return a Markdown synthesis guide with explicit instructions for
+        completing the content fusion."""
+        ...

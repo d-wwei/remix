@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 from remix.utils import generate_id, utc_now_iso
-from remix.builder import AuditComposer, ReleaseManager, TargetBuilder
-from remix.interfaces import Analyzer, EvolutionBackend, Validator
+from remix.builder import AuditComposer, HeuristicContentSynthesizer, ReleaseManager, TargetBuilder
+from remix.interfaces import Analyzer, ContentSynthesizer, EvolutionBackend, Validator
 from remix.null_plugins import NullEvolutionBackend, NullValidator
 from remix.planning import BuildPlanner, ComparisonEngine, SourceAnalyzer, StrategySynthesizer
 from remix.profiles import TargetProfileRegistry
@@ -46,6 +46,7 @@ class RemixRuntime:
         validator: Validator | None = None,
         evolution_backend: EvolutionBackend | None = None,
         analyzer: Analyzer | None = None,
+        content_synthesizer: ContentSynthesizer | None = None,
         output_root: str | Path | None = None,
         evolution: object = _SENTINEL,
     ):
@@ -86,7 +87,8 @@ class RemixRuntime:
         self.comparison_engine = ComparisonEngine()
         self.strategy_synthesizer = StrategySynthesizer()
         self.build_planner = BuildPlanner()
-        self.target_builder = TargetBuilder(self.validator)
+        self.content_synthesizer: ContentSynthesizer = content_synthesizer or HeuristicContentSynthesizer()
+        self.target_builder = TargetBuilder(self.validator, content_synthesizer=self.content_synthesizer)
         self.verifier = VerificationOrchestrator(self.validator)
         self.audit_composer = AuditComposer()
         self.release_manager = ReleaseManager()
@@ -190,6 +192,7 @@ class RemixRuntime:
             selected_strategy=selected_strategy,
             normalized_sources=normalized_sources,
             analysis_reports=analysis_reports,
+            comparison=comparison,
         )
         verification = self.verifier.verify(
             workspace=workspace,

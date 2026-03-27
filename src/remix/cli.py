@@ -25,10 +25,39 @@ def _resolve_evolution(args: argparse.Namespace) -> bool | object:
     return _SENTINEL  # auto-detect
 
 
+def _resolve_analyzer(args: argparse.Namespace):
+    """Resolve --analyzer flag to an Analyzer instance or None (default)."""
+    analyzer_name = getattr(args, "analyzer", None)
+    if not analyzer_name or analyzer_name == "heuristic":
+        return None  # use default SourceAnalyzer
+    if analyzer_name == "llm":
+        from remix.llm_analyzer import LLMAnalyzer
+        return LLMAnalyzer()
+    raise argparse.ArgumentTypeError(f"Unknown analyzer: {analyzer_name}")
+
+
+def _resolve_content_synthesizer(args: argparse.Namespace):
+    """Resolve --synthesizer flag to a ContentSynthesizer instance or None."""
+    synthesizer_name = getattr(args, "synthesizer", None)
+    if not synthesizer_name or synthesizer_name == "heuristic":
+        return None  # use default HeuristicContentSynthesizer
+    if synthesizer_name == "llm":
+        from remix.llm_analyzer import LLMContentSynthesizer
+        return LLMContentSynthesizer()
+    raise argparse.ArgumentTypeError(f"Unknown synthesizer: {synthesizer_name}")
+
+
 def _make_runtime(args: argparse.Namespace, **kwargs):
     from remix.runtime import RemixRuntime
     evolution = _resolve_evolution(args)
-    return RemixRuntime(evolution=evolution, **kwargs)
+    analyzer = _resolve_analyzer(args)
+    content_synthesizer = _resolve_content_synthesizer(args)
+    return RemixRuntime(
+        evolution=evolution,
+        analyzer=analyzer,
+        content_synthesizer=content_synthesizer,
+        **kwargs,
+    )
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
@@ -126,6 +155,22 @@ def _add_evolution_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_plugin_flags(parser: argparse.ArgumentParser) -> None:
+    """Add --analyzer and --synthesizer plugin flags to a subparser."""
+    parser.add_argument(
+        "--analyzer",
+        default=None,
+        choices=["heuristic", "llm"],
+        help="Analysis backend: 'heuristic' (default) or 'llm' (requires ANTHROPIC_API_KEY)",
+    )
+    parser.add_argument(
+        "--synthesizer",
+        default=None,
+        choices=["heuristic", "llm"],
+        help="Content synthesis backend: 'heuristic' (default) or 'llm' (requires ANTHROPIC_API_KEY)",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="remix", description="Artifact reconstruction and synthesis tool")
     sub = parser.add_subparsers(dest="command")
@@ -137,18 +182,21 @@ def main(argv: list[str] | None = None) -> None:
     run_parser.add_argument("--strategy", default=None, help="Strategy ID to select (auto-selects best if omitted)")
     run_parser.add_argument("--output", default=None, help="Output root directory (default: .remix/)")
     _add_evolution_flag(run_parser)
+    _add_plugin_flags(run_parser)
 
     # --- analyze ---
     analyze_parser = sub.add_parser("analyze", help="Analyze sources without building (scores only)")
     analyze_parser.add_argument("--brief", required=True, help="Brief as inline JSON or path to JSON file")
     analyze_parser.add_argument("--sources", required=True, help="Sources as inline JSON or path to JSON file")
     _add_evolution_flag(analyze_parser)
+    _add_plugin_flags(analyze_parser)
 
     # --- compare ---
     compare_parser = sub.add_parser("compare", help="Analyze and compare sources (rankings + strategies)")
     compare_parser.add_argument("--brief", required=True, help="Brief as inline JSON or path to JSON file")
     compare_parser.add_argument("--sources", required=True, help="Sources as inline JSON or path to JSON file")
     _add_evolution_flag(compare_parser)
+    _add_plugin_flags(compare_parser)
 
     # --- profiles ---
     profiles_parser = sub.add_parser("profiles", help="List available target profiles")
