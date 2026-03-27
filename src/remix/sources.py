@@ -1,12 +1,136 @@
 from __future__ import annotations
 
+import fnmatch
 import json
+import logging
+import os
 import re
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from remix.utils import compact_excerpt, infer_license_name, limited, safe_read_text, slugify, top_words, utc_now_iso
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# GitHub repo URL detection
+# ---------------------------------------------------------------------------
+# Matches  https://github.com/{owner}/{repo}  (with optional trailing slash or .git)
+# Does NOT match deeper paths like /blob/, /tree/, /issues, etc.
+_GITHUB_REPO_RE = re.compile(
+    r"^https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+_DEFAULT_GITHUB_PATHS: List[str] = [
+    "**/SKILL.md",
+    "**/README.md",
+    "**/manifest.json",
+    "**/*.py",
+]
+
+# Maximum individual file fetches from a single repo (stay within rate limits).
+_MAX_GITHUB_FILES = 40
+
+
+def is_github_repo_url(url: str) -> bool:
+    """Return True if *url* looks like a GitHub repository root URL."""
+    return bool(_GITHUB_REPO_RE.match(url.strip()))
+
+
+def parse_github_repo_url(url: str) -> Tuple[str, str] | None:
+    """Extract (owner, repo) from a GitHub repo URL, or None."""
+    m = _GITHUB_REPO_RE.match(url.strip())
+    if m:
+        return m.group("owner"), m.group("repo")
+    return None
+
+
+def _github_headers() -> Dict[str, str]:
+    """Build HTTP headers for GitHub API calls.
+
+    Respects the ``GITHUB_TOKEN`` environment variable for authenticated
+    requests (5 000 req/hour instead of 60).
+    """
+    headers: Dict[str, str] = {
+        "User-Agent": "remix/1.0",
+        "Accept": "application/vnd.github+json",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_get(url: str, *, timeout: int = 15) -> bytes:
+    """Perform a GET against the GitHub API / raw.githubusercontent.com.
+
+    Raises ``RuntimeError`` with a human-friendly message on HTTP errors,
+    including rate-limit (403/429) hints.
+    """
+    req = urllib.request.Request(url, headers=_github_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            remaining = exc.headers.get("X-RateLimit-Remaining", "?")
+            reset = exc.headers.get("X-RateLimit-Reset", "?")
+            raise RuntimeError(
+                f"GitHub API rate limit hit ({exc.code}). "
+                f"Remaining: {remaining}, resets at epoch {reset}. "
+                "Set GITHUB_TOKEN env var for 5 000 req/hour."
+            ) from exc
+        raise RuntimeError(f"GitHub API error {exc.code} for {url}") from exc
+
+
+def _match_paths(file_path: str, patterns: Sequence[str]) -> bool:
+    """Return True if *file_path* matches any of the glob *patterns*.
+
+    Each pattern is tested with ``fnmatch`` against both the full path and
+    the basename, so ``**/*.py`` and ``*.py`` both match ``src/foo.py``.
+    """
+    basename = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+    for pat in patterns:
+        # Strip leading **/ for fnmatch compatibility (fnmatch does not
+        # natively understand the recursive ** globstar).
+        simple = pat.lstrip("*").lstrip("/")
+        if fnmatch.fnmatch(file_path, pat):
+            return True
+        if fnmatch.fnmatch(basename, simple):
+            return True
+        if fnmatch.fnmatch(file_path, simple):
+            return True
+        # Also try the original pattern against just the basename.
+        if fnmatch.fnmatch(basename, pat):
+            return True
+    return False
+
+
+def expand_github_repo_source(source: Dict[str, Any] | str) -> Dict[str, Any]:
+    """Normalise a source entry that may be a bare GitHub URL string.
+
+    If *source* is a plain string matching a GitHub repo URL it is promoted
+    to a ``{"kind": "github_repo", "url": ...}`` dict.  If *source* is
+    already a dict whose ``url`` field is a GitHub repo URL and no ``kind``
+    is set (or kind is ``"url"``), it is re-tagged as ``github_repo``.
+
+    The function is idempotent: sources that are already ``github_repo``
+    or that don't match are returned unchanged.
+    """
+    if isinstance(source, str):
+        if is_github_repo_url(source):
+            return {"kind": "github_repo", "url": source}
+        # Not a GitHub repo URL -- return as-is (will be handled elsewhere).
+        return {"kind": "raw_text", "content": source}
+
+    url = source.get("url", "")
+    if source.get("kind") in (None, "url") and is_github_repo_url(url):
+        out = dict(source)
+        out["kind"] = "github_repo"
+        return out
+    return source
 
 
 TEXT_EXTENSIONS = {
@@ -35,6 +159,8 @@ class SourceAdapter:
     def normalize_sources(self, sources: Sequence[Dict[str, Any]], brief: Dict[str, Any]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
         for index, source in enumerate(sources, start=1):
+            # Auto-detect bare GitHub repo URL strings and untagged dicts.
+            source = expand_github_repo_source(source)
             normalized.append(self._normalize_source(source, index=index, brief=brief))
         return normalized
 
@@ -45,6 +171,8 @@ class SourceAdapter:
 
         if kind in {"directory", "repository"}:
             payload = self._from_directory(source)
+        elif kind == "github_repo":
+            payload = self._from_github_repo(source)
         elif kind in {"file", "document"}:
             payload = self._from_file(source)
         elif kind in {"url", "github"}:
@@ -121,6 +249,144 @@ class SourceAdapter:
             "entrypoints": [item for item in file_tree if item.endswith(("main.py", "__init__.py", "package.json", "pyproject.toml", "manifest.json", "SKILL.md"))][:10],
             "license": self._read_license_from_directory(root),
         }
+
+    def _from_github_repo(self, source: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch files from a GitHub repository and combine into a single source.
+
+        The source dict must contain a ``url`` key pointing to a GitHub repo.
+        An optional ``paths`` key provides glob patterns to filter the tree;
+        when omitted the default skill-oriented patterns are used.
+        """
+        url = source["url"]
+        parsed = parse_github_repo_url(url)
+        if parsed is None:
+            raise ValueError(f"Not a valid GitHub repo URL: {url}")
+        owner, repo = parsed
+        path_patterns: List[str] = source.get("paths") or list(_DEFAULT_GITHUB_PATHS)
+        branch = source.get("branch", "HEAD")
+
+        # 1. Fetch the recursive file tree via the Git Trees API.
+        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        try:
+            tree_data = json.loads(_github_get(tree_url))
+        except RuntimeError as exc:
+            logger.warning("GitHub tree fetch failed for %s/%s: %s", owner, repo, exc)
+            return {
+                "location": url,
+                "content": f"[error fetching repo tree: {exc}]",
+                "file_tree_summary": [],
+                "docs_presence": False,
+                "tests_presence": False,
+            }
+
+        if "tree" not in tree_data:
+            logger.warning("Unexpected GitHub API response for %s/%s (no tree key)", owner, repo)
+            return {
+                "location": url,
+                "content": "[GitHub API returned no tree data]",
+                "file_tree_summary": [],
+                "docs_presence": False,
+                "tests_presence": False,
+            }
+
+        # All blob entries (files) from the tree.
+        all_files: List[str] = [
+            entry["path"]
+            for entry in tree_data["tree"]
+            if entry.get("type") == "blob"
+        ]
+
+        # 2. Filter files by the requested glob patterns.
+        matched_files = [f for f in all_files if _match_paths(f, path_patterns)]
+
+        # Also always include LICENSE if present (for license detection).
+        license_files = [
+            f for f in all_files
+            if f.upper().startswith("LICENSE") or f.upper() == "COPYING"
+        ]
+        for lf in license_files:
+            if lf not in matched_files:
+                matched_files.append(lf)
+
+        # Cap the number of files to fetch.
+        matched_files = matched_files[:_MAX_GITHUB_FILES]
+
+        # Build a complete file tree summary from the repo (capped).
+        file_tree_summary = all_files[:80]
+
+        # 3. Fetch each matched file's content via raw.githubusercontent.
+        # Resolve the default branch name from the tree URL response.
+        default_branch = tree_data.get("url", "").rsplit("/", 1)[-1] if branch == "HEAD" else branch
+        if not default_branch or default_branch == "HEAD":
+            try:
+                repo_info = json.loads(
+                    _github_get(f"https://api.github.com/repos/{owner}/{repo}")
+                )
+                default_branch = repo_info.get("default_branch", "main")
+            except RuntimeError:
+                default_branch = "main"
+
+        excerpts: List[str] = []
+        fetched_count = 0
+        failed_count = 0
+        for file_path in matched_files:
+            raw_url = (
+                f"https://raw.githubusercontent.com/{owner}/{repo}"
+                f"/{default_branch}/{file_path}"
+            )
+            try:
+                raw_bytes = _github_get(raw_url, timeout=10)
+                text = raw_bytes.decode("utf-8", errors="replace")
+                excerpts.append(f"## {file_path}\n{text[:3000]}")
+                fetched_count += 1
+            except RuntimeError as exc:
+                logger.debug("Failed to fetch %s: %s", raw_url, exc)
+                failed_count += 1
+
+        content = "\n\n".join(excerpts)
+
+        # 4. Derive metadata signals.
+        return {
+            "location": url,
+            "content": content,
+            "file_tree_summary": file_tree_summary,
+            "manifest_presence": any(f.endswith("manifest.json") for f in all_files),
+            "skill_md_presence": any(f.endswith("SKILL.md") for f in all_files),
+            "docs_presence": any(
+                "readme" in f.lower() or "docs" in f.lower().split("/")
+                for f in all_files
+            ),
+            "tests_presence": any(
+                "test" in part.lower() for f in all_files for part in f.split("/")
+            ),
+            "entrypoints": [
+                f for f in all_files
+                if f.endswith((
+                    "main.py", "__init__.py", "package.json",
+                    "pyproject.toml", "manifest.json", "SKILL.md",
+                ))
+            ][:10],
+            "license": self._detect_license_from_content(excerpts),
+            "version": tree_data.get("sha", "unknown")[:12],
+            "github_repo_meta": {
+                "owner": owner,
+                "repo": repo,
+                "branch": default_branch,
+                "total_files": len(all_files),
+                "matched_files": len(matched_files),
+                "fetched_files": fetched_count,
+                "failed_files": failed_count,
+                "path_patterns": path_patterns,
+            },
+        }
+
+    def _detect_license_from_content(self, excerpts: List[str]) -> str | None:
+        """Try to detect a license from fetched file excerpts."""
+        for excerpt in excerpts:
+            if excerpt.startswith("## LICENSE") or excerpt.startswith("## COPYING"):
+                license_text = excerpt.split("\n", 1)[-1] if "\n" in excerpt else excerpt
+                return infer_license_name(license_text)
+        return None
 
     def _from_file(self, source: Dict[str, Any]) -> Dict[str, Any]:
         path = Path(source["path"]).expanduser().resolve()
