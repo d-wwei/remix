@@ -140,3 +140,8 @@ remix/
 
 - [Skill-SE-Kit](https://github.com/d-wwei/skill-se-kit): optional self-evolution plugin
 - [Agent Skill Governor](https://github.com/d-wwei/agent-skill-governor): governance layer that can invoke Remix
+
+## Installation Notes
+
+- **pip >= 22.0 is recommended.** Newer pip versions correctly parse `pyproject.toml` metadata out of the box.
+- A `setup.cfg` file is included for backward compatibility with older pip versions (e.g., pip 21.x shipped with Python 3.9). Older pip may fail to read `[project]` metadata from `pyproject.toml`, causing the package to install as `UNKNOWN`. The `setup.cfg` file provides the same metadata in the legacy format so that `pip install .` works correctly regardless of pip version.
