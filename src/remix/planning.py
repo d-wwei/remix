@@ -276,6 +276,14 @@ class ComparisonEngine:
 
 
 class StrategySynthesizer:
+    # Keywords in the brief that signal multi-source synthesis intent.
+    _MULTI_SOURCE_KEYWORDS = frozenset({
+        "combine", "combining", "synthesize", "synthesizing",
+        "merge", "merging", "fuse", "fusing",
+        "integrate", "integrating", "blend", "blending",
+        "mix", "mixing", "union", "unify",
+    })
+
     def synthesize(
         self,
         comparison: Dict[str, Any],
@@ -345,7 +353,26 @@ class StrategySynthesizer:
                 score=round(lead["overall_score"] - 0.1, 3),
             )
         )
+
+        # Boost multi-source strategies when the brief signals synthesis intent.
+        if self._has_multi_source_intent(brief):
+            for option in options:
+                if option["name"] in {"Balanced Synthesis", "Forward Port"}:
+                    option["strategy_score"] = round(option["strategy_score"] + 0.5, 3)
+                elif option["name"] == "Conservative Harden":
+                    option["strategy_score"] = round(option["strategy_score"] - 0.3, 3)
+            options.sort(key=lambda item: (-item["strategy_score"], item["strategy_id"]))
+
         return limited(options, limit=3)
+
+    @classmethod
+    def _has_multi_source_intent(cls, brief: Dict[str, Any]) -> bool:
+        """Return True if the brief's text fields contain multi-source intent keywords."""
+        text = " ".join(
+            str(brief.get(field) or "")
+            for field in ("target_job", "objective", "description")
+        ).lower()
+        return bool(cls._MULTI_SOURCE_KEYWORDS & set(text.split()))
 
     def _build_strategy(
         self,
