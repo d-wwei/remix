@@ -4,13 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "remix"
-version = "0.1.0"
-description = "Artifact remix system that integrates Skill-SE-Kit"
+version = "0.2.0"
+description = "Universal artifact reconstruction and synthesis system"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-  "skill-se-kit>=0.1.0",
+  "jsonschema>=4.0",
 ]
+
+[project.optional-dependencies]
+evolution = ["skill-se-kit>=0.1.0"]
+
+[project.scripts]
+remix = "remix.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

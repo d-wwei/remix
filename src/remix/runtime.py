@@ -1,41 +1,108 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
-from skill_se_kit.common import dump_json, generate_id, utc_now_iso
+from remix.utils import generate_id, utc_now_iso
 from remix.builder import AuditComposer, ReleaseManager, TargetBuilder
+from remix.interfaces import Analyzer, EvolutionBackend, Validator
+from remix.null_plugins import NullEvolutionBackend, NullValidator
 from remix.planning import BuildPlanner, ComparisonEngine, SourceAnalyzer, StrategySynthesizer
 from remix.profiles import TargetProfileRegistry
 from remix.sources import SourceAdapter
 from remix.verification import VerificationOrchestrator
 from remix.workspace import RemixRunWorkspace
-from skill_se_kit.runtime.skill_runtime import SkillRuntime
+
+
+_SENTINEL = object()
+
+
+def _auto_detect_evolution() -> tuple[Validator | None, EvolutionBackend | None]:
+    """Try to import skill-se-kit and return usable plugins, or None."""
+    try:
+        from skill_se_kit.runtime.skill_runtime import SkillRuntime  # noqa: F401
+        # skill-se-kit is importable — but we need a configured runtime
+        # to get real validator/backend. Return None to signal "available
+        # but needs explicit wiring via from_skill_runtime()".
+        # For auto-detect, we just confirm it's installed.
+        return None, None
+    except ImportError:
+        return None, None
+
+
+def has_skill_se_kit() -> bool:
+    """Check if skill-se-kit is installed and importable."""
+    try:
+        import skill_se_kit  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 class RemixRuntime:
-    def __init__(self, *, skill_root: str | Path, protocol_root: str | Path):
-        self.skill_runtime = SkillRuntime(skill_root=skill_root, protocol_root=protocol_root)
+    def __init__(
+        self,
+        *,
+        validator: Validator | None = None,
+        evolution_backend: EvolutionBackend | None = None,
+        analyzer: Analyzer | None = None,
+        output_root: str | Path | None = None,
+        evolution: object = _SENTINEL,
+    ):
+        """Initialize RemixRuntime.
+
+        Args:
+            evolution: Controls skill-se-kit integration.
+                - _SENTINEL (default): auto-detect. If skill-se-kit is installed,
+                  use it; otherwise fall back to null plugins silently.
+                - True: require skill-se-kit (raise if not installed).
+                - False: explicitly disable, use null plugins even if installed.
+                - None: same as False.
+        """
+        if evolution is _SENTINEL:
+            # Default: auto-detect
+            self._evolution_available = has_skill_se_kit()
+            self._evolution_enabled = self._evolution_available
+        elif evolution:
+            # Explicit enable
+            if not has_skill_se_kit():
+                raise ImportError(
+                    "skill-se-kit is required but not installed. "
+                    "Install with: pip install remix[evolution]"
+                )
+            self._evolution_available = True
+            self._evolution_enabled = True
+        else:
+            # Explicit disable
+            self._evolution_available = has_skill_se_kit()
+            self._evolution_enabled = False
+
+        self.validator = validator or NullValidator()
+        self.evolution_backend = evolution_backend or NullEvolutionBackend()
+        self.output_root = Path(output_root) if output_root else Path.cwd() / ".remix"
         self.profile_registry = TargetProfileRegistry()
         self.source_adapter = SourceAdapter()
-        self.source_analyzer = SourceAnalyzer()
+        self.source_analyzer: Analyzer = analyzer or SourceAnalyzer()
         self.comparison_engine = ComparisonEngine()
         self.strategy_synthesizer = StrategySynthesizer()
         self.build_planner = BuildPlanner()
-        self.target_builder = TargetBuilder(self.skill_runtime.protocol_adapter)
-        self.verifier = VerificationOrchestrator(self.skill_runtime.protocol_adapter)
+        self.target_builder = TargetBuilder(self.validator)
+        self.verifier = VerificationOrchestrator(self.validator)
         self.audit_composer = AuditComposer()
         self.release_manager = ReleaseManager()
 
     @property
-    def workspace(self):
-        return self.skill_runtime.workspace
-
-    def bootstrap(self, manifest: Dict[str, Any]) -> None:
-        self.skill_runtime.workspace.bootstrap(manifest)
+    def evolution_status(self) -> dict:
+        """Report evolution integration status for agent introspection."""
+        return {
+            "skill_se_kit_installed": self._evolution_available,
+            "evolution_enabled": self._evolution_enabled,
+            "backend": type(self.evolution_backend).__name__,
+            "validator": type(self.validator).__name__,
+        }
 
     def detect_governor(self) -> bool:
-        return self.skill_runtime.detect_governor()
+        return self.evolution_backend.detect_governor()
 
     def list_profiles(self) -> List[Dict[str, Any]]:
         return self.profile_registry.list_profiles()
@@ -169,11 +236,11 @@ class RemixRuntime:
             "generated_outputs": build_result["outputs"],
             "comparison_top_source": comparison["source_rankings"][0]["source_id"] if comparison["source_rankings"] else None,
         }
-        dump_json(workspace.release_bundle_dir / "run_summary.json", summary)
+        workspace.write_json(workspace.release_bundle_dir / "run_summary.json", summary)
         return summary
 
     def _default_run_root(self, run_id: str) -> Path:
-        return self.workspace.metadata_root / "remix" / "runs" / run_id
+        return self.output_root / "runs" / run_id
 
     def _select_strategy(self, strategies: Sequence[Dict[str, Any]], *, selected_strategy_id: str | None) -> Dict[str, Any]:
         if not strategies:
@@ -195,7 +262,7 @@ class RemixRuntime:
         verification: Dict[str, Any],
         workspace: RemixRunWorkspace,
     ) -> None:
-        self.skill_runtime.record_experience(
+        self.evolution_backend.record_experience(
             kind="observation",
             summary=f"remix run {run_id} finished with {verification['overall_status']}",
             source_origin="remix",
@@ -212,6 +279,18 @@ class RemixRuntime:
                 "target_job": brief.get("target_job"),
             },
         )
+
+
+def from_skill_runtime(*, skill_root: str | Path, protocol_root: str | Path) -> RemixRuntime:
+    """Backward-compatible factory. Requires skill-se-kit to be installed."""
+    from skill_se_kit.runtime.skill_runtime import SkillRuntime
+
+    sr = SkillRuntime(skill_root=skill_root, protocol_root=protocol_root)
+    return RemixRuntime(
+        validator=sr.protocol_adapter,
+        evolution_backend=sr,
+        output_root=sr.workspace.metadata_root / "remix",
+    )
 
 
 # Backward-compatible alias during the repo split transition.

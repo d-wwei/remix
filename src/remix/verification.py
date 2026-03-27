@@ -8,8 +8,8 @@ from jsonschema import Draft202012Validator
 
 
 class VerificationOrchestrator:
-    def __init__(self, protocol_adapter) -> None:
-        self.protocol_adapter = protocol_adapter
+    def __init__(self, validator) -> None:
+        self.validator = validator
 
     def verify(
         self,
@@ -105,7 +105,7 @@ class VerificationOrchestrator:
         manifest_path = workspace.remixed_output_dir / "skill" / "manifest.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.protocol_adapter.validate_manifest(manifest)
+            self.validator.validate_manifest(manifest)
             checks.append({"name": "skill-manifest-validation", "status": "pass", "details": "Generated skill manifest is protocol-compatible."})
         except Exception as exc:  # pragma: no cover - exercised in failure scenarios
             checks.append({"name": "skill-manifest-validation", "status": "fail", "details": str(exc)})
@@ -114,7 +114,7 @@ class VerificationOrchestrator:
             proposal_path = workspace.release_bundle_dir / "governor_candidate" / "skill_proposal.json"
             try:
                 proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
-                self.protocol_adapter.validate_proposal(proposal)
+                self.validator.validate_proposal(proposal)
                 checks.append({"name": "governor-candidate-validation", "status": "pass", "details": "Governor-ready candidate proposal validates."})
             except Exception as exc:  # pragma: no cover - exercised in failure scenarios
                 checks.append({"name": "governor-candidate-validation", "status": "fail", "details": str(exc)})

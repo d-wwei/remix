@@ -3,13 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
-from skill_se_kit.common import SUPPORTED_PROTOCOL_VERSION, generate_id, utc_now_iso
-from remix.utils import compact_excerpt, markdown_bullets, skillify, slugify
+from remix.utils import DEFAULT_PROTOCOL_VERSION as SUPPORTED_PROTOCOL_VERSION, compact_excerpt, generate_id, markdown_bullets, skillify, slugify, utc_now_iso
 
 
 class TargetBuilder:
-    def __init__(self, protocol_adapter) -> None:
-        self.protocol_adapter = protocol_adapter
+    def __init__(self, validator) -> None:
+        self.validator = validator
 
     def build(
         self,
@@ -197,7 +196,7 @@ class TargetBuilder:
                 "source_ids": selected_strategy["source_ids"],
             },
         }
-        self.protocol_adapter.validate_manifest(manifest)
+        self.validator.validate_manifest(manifest)
         workspace.write_json(workspace.remixed_output_dir / "skill" / "manifest.json", manifest)
 
         workflows = []
@@ -438,11 +437,19 @@ class TargetBuilder:
             [
                 "# Rollout Plan",
                 "",
+                "## Staged Rollout",
                 markdown_bullets(
                     [
                         "Launch behind a flag or staged availability mechanism.",
                         "Collect baseline metrics before rollout.",
+                    ]
+                ),
+                "",
+                "## Rollback",
+                markdown_bullets(
+                    [
                         "Prepare rollback triggers and ownership contacts.",
+                        "Define failure thresholds that trigger automatic rollback.",
                     ]
                 ),
             ]
@@ -676,7 +683,7 @@ class TargetBuilder:
                 "artifact_id": artifact_manifest["artifact_id"],
             },
         }
-        self.protocol_adapter.validate_proposal(proposal)
+        self.validator.validate_proposal(proposal)
         return proposal
 
     def _build_companion_skill_wrapper(

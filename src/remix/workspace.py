@@ -3,8 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
 
-from skill_se_kit.common import dump_json
-from remix.utils import write_text
+from remix.utils import dump_json, write_text
 
 
 class RemixRunWorkspace:

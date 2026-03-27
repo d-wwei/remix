@@ -4,14 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_support import PROTOCOL_ROOT, load_example_manifest
-from skill_se_kit.common import load_json
-from remix.runtime import RemixRuntime
+from tests.test_support import PROTOCOL_ROOT, has_skill_se_kit, load_example_manifest
 
 
+@unittest.skipUnless(has_skill_se_kit(), "skill-se-kit not installed")
 class RemixRuntimeTests(unittest.TestCase):
-    def _runtime(self, root: str) -> RemixRuntime:
-        runtime = RemixRuntime(skill_root=root, protocol_root=PROTOCOL_ROOT)
+    def _runtime(self, root: str):
+        from remix.runtime import from_skill_runtime
+
+        runtime = from_skill_runtime(skill_root=root, protocol_root=PROTOCOL_ROOT)
         manifest = load_example_manifest("standalone.manifest.json")
         manifest["skill_id"] = "remix.core"
         manifest["name"] = "Remix"
@@ -88,10 +89,11 @@ class RemixRuntimeTests(unittest.TestCase):
 
             self.assertEqual(summary["overall_status"], "pass")
             run_root = Path(summary["run_root"])
-            generated_manifest = load_json(run_root / "remixed_output" / "skill" / "manifest.json")
-            runtime.skill_runtime.protocol_adapter.validate_manifest(generated_manifest)
-            proposal = load_json(run_root / "release_bundle" / "governor_candidate" / "skill_proposal.json")
-            runtime.skill_runtime.protocol_adapter.validate_proposal(proposal)
+            import json
+            generated_manifest = json.loads((run_root / "remixed_output" / "skill" / "manifest.json").read_text(encoding="utf-8"))
+            runtime.validator.validate_manifest(generated_manifest)
+            proposal = json.loads((run_root / "release_bundle" / "governor_candidate" / "skill_proposal.json").read_text(encoding="utf-8"))
+            runtime.validator.validate_proposal(proposal)
             self.assertTrue((run_root / "audit" / "audit_summary.md").exists())
             self.assertTrue((run_root / "verification_report.md").exists())
 

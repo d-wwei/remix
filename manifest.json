@@ -1,0 +1,74 @@
+{
+  "name": "remix",
+  "version": "0.2.0",
+  "description": "Universal artifact reconstruction and synthesis tool. Analyzes, compares, and rebuilds skills, protocols, modules, features, products, and compound bundles.",
+  "type": "tool",
+  "entry": {
+    "cli": "remix",
+    "python": "remix.runtime:RemixRuntime"
+  },
+  "capabilities": [
+    "artifact-analysis",
+    "artifact-comparison",
+    "artifact-synthesis",
+    "artifact-verification",
+    "provenance-tracking"
+  ],
+  "target_profiles": ["skill", "protocol", "module", "feature", "product", "compound"],
+  "interfaces": {
+    "cli": {
+      "commands": {
+        "analyze": {
+          "description": "Analyze sources without building (scores only)",
+          "args": {
+            "brief": "Brief as inline JSON or path to JSON file (required)",
+            "sources": "Sources as inline JSON or path to JSON file (required)"
+          }
+        },
+        "compare": {
+          "description": "Analyze and compare sources (rankings + strategies, no build)",
+          "args": {
+            "brief": "Brief as inline JSON or path to JSON file (required)",
+            "sources": "Sources as inline JSON or path to JSON file (required)"
+          }
+        },
+        "run": {
+          "description": "Run the full remix pipeline (analyze + compare + build + verify)",
+          "args": {
+            "brief": "Brief as inline JSON or path to JSON file (required)",
+            "sources": "Sources as inline JSON or path to JSON file (required)",
+            "strategy": "Strategy ID to select (optional, auto-selects best)",
+            "output": "Output root directory (optional, default: .remix/)"
+          }
+        },
+        "profiles": {
+          "description": "List available target profiles"
+        }
+      }
+    },
+    "python": {
+      "class": "RemixRuntime",
+      "methods": {
+        "run": "Execute full remix pipeline, returns summary dict",
+        "list_profiles": "List available target profiles"
+      }
+    }
+  },
+  "dependencies": {
+    "required": {
+      "python": ">=3.9",
+      "jsonschema": ">=4.0"
+    },
+    "optional": {
+      "skill-se-kit": ">=0.1.0 (for self-evolution integration)"
+    }
+  },
+  "extension_points": {
+    "validator": "remix.interfaces:Validator",
+    "evolution_backend": "remix.interfaces:EvolutionBackend"
+  },
+  "metadata": {
+    "repository": "https://github.com/d-wwei/remix",
+    "license": "MIT"
+  }
+}

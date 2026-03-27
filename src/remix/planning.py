@@ -7,6 +7,8 @@ from remix.utils import compact_excerpt, keyword_overlap, limited, markdown_bull
 
 
 class SourceAnalyzer:
+    """Default heuristic analyzer. Implements the Analyzer protocol."""
+
     def analyze_sources(
         self,
         normalized_sources: Sequence[Dict[str, Any]],
@@ -17,12 +19,12 @@ class SourceAnalyzer:
         workers = min(4, max(1, len(normalized_sources)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
-                executor.submit(self._analyze_source, source, brief=brief, target_profile=target_profile)
+                executor.submit(self.analyze_source, source, brief=brief, target_profile=target_profile)
                 for source in normalized_sources
             ]
             return [future.result() for future in futures]
 
-    def _analyze_source(
+    def analyze_source(
         self,
         source: Dict[str, Any],
         *,
@@ -66,6 +68,15 @@ class SourceAnalyzer:
             "objective_coverage": _bounded_score(1.8 + min(overlap, 8) / 2.5),
             "dependency_realism": _bounded_score(3.8 - min(source.get("dependency_signals", {}).get("dependency_mentions", 0), 5) * 0.2),
         }
+
+        # Apply fixed score overrides from the brief's scoring_overrides.
+        scoring_overrides = brief.get("scoring_overrides") or {}
+        for dimension, overrides in scoring_overrides.items():
+            if isinstance(overrides, dict) and "score" in overrides:
+                scores[dimension] = _bounded_score(float(overrides["score"]))
+            elif isinstance(overrides, dict) and dimension not in scores and "weight" in overrides:
+                # Custom dimension with a weight but no explicit score — assign neutral baseline.
+                scores[dimension] = _bounded_score(2.5)
 
         strengths: List[str] = []
         if source.get("docs_presence"):
@@ -142,6 +153,13 @@ class ComparisonEngine:
     ) -> Dict[str, Any]:
         source_index = {item["source_id"]: item for item in normalized_sources}
         weights = dict(target_profile.get("default_weights", {}))
+
+        # Apply user-specified scoring overrides from the brief.
+        scoring_overrides = brief.get("scoring_overrides") or {}
+        for dimension, overrides in scoring_overrides.items():
+            if isinstance(overrides, dict) and "weight" in overrides:
+                weights[dimension] = float(overrides["weight"])
+
         for criterion in brief.get("success_criteria", []) or []:
             lowered = str(criterion).lower()
             if "test" in lowered:

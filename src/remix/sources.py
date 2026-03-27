@@ -6,8 +6,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
-from skill_se_kit.common import utc_now_iso
-from remix.utils import compact_excerpt, infer_license_name, limited, safe_read_text, slugify, top_words
+from remix.utils import compact_excerpt, infer_license_name, limited, safe_read_text, slugify, top_words, utc_now_iso
 
 
 TEXT_EXTENSIONS = {

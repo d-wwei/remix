@@ -2,8 +2,26 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
+
+
+DEFAULT_PROTOCOL_VERSION = "1.0.0"
+
+
+def generate_id(prefix: str = "remix") -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def dump_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 WORD_RE = re.compile(r"[A-Za-z0-9_./:-]+")
